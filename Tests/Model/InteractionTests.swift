@@ -53,6 +53,75 @@ final class InteractionTests: InteractionTestCase {
 		}
 	}
 
+	func testProviderStateParams() async throws {
+		try builder
+			.uponReceiving("a request for a user")
+			.given(try Interaction.ProviderState(description: "A user exists", params: ["id": 1, "name": "John"]))
+			.withRequest(path: "/users/1")
+			.willRespond(with: 200)
+
+		try await builder.verify { ctx in
+			let request = try ctx.buildURLRequest(path: "/users/1")
+			let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+
+			XCTAssertEqual(try XCTUnwrap(response as? HTTPURLResponse).statusCode, 200)
+		}
+	}
+
+	func testStatusCodeMatcher() async throws {
+		try builder
+			.uponReceiving("a request for a missing event")
+			.withRequest(path: "/events/missing")
+			.willRespond(with: .statusCode(.clientError, example: 404))
+
+		try await builder.verify { ctx in
+			let request = try ctx.buildURLRequest(path: "/events/missing")
+			let (_, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+
+			let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+			XCTAssertEqual(httpResponse.statusCode, 404)
+		}
+	}
+
+	func testRegexAndProviderStateGenerators() async throws {
+		struct Response: Decodable {
+			var id: Int
+			var code: String
+		}
+
+		try builder
+			.uponReceiving("a request for a generated user")
+			.given(try Interaction.ProviderState(description: "A user exists", params: ["id": 7]))
+			.withRequest(path: "/users/1")
+			.willRespond(with: 200) { response in
+				try response.jsonBody(
+					.like([
+						"id": .fromProviderState("id", example: 1),
+						"code": .generatedRegex("^[A-Z]{3}$", example: "ABC")
+					])
+				)
+			}
+
+		try await builder.verify { ctx in
+			let request = try ctx.buildURLRequest(path: "/users/1")
+			let (data, _) = try await URLSession(configuration: .ephemeral).data(for: request)
+
+			let body = try JSONDecoder().decode(Response.self, from: data)
+			XCTAssertEqual(body.id, 1)
+			XCTAssertNotNil(body.code.range(of: "^[A-Z]{3}$", options: .regularExpression))
+		}
+
+		let pactFile = URL(fileURLWithPath: ProcessInfo.processInfo.environment["PACT_OUTPUT_DIR"]!).appendingPathComponent("Consumer-Provider.json")
+		let pact = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: pactFile)) as? [String: Any])
+		let interaction = try XCTUnwrap((pact["interactions"] as? [[String: Any]])?.first { $0["description"] as? String == "a request for a generated user" })
+		let generators = try XCTUnwrap(((interaction["response"] as? [String: Any])?["generators"] as? [String: Any])?["body"] as? [String: [String: Any]])
+		XCTAssertEqual(generators["$.id"]?["type"] as? String, "ProviderState")
+		XCTAssertEqual(generators["$.id"]?["expression"] as? String, "id")
+		XCTAssertEqual(generators["$.id"]?["dataType"] as? String, "INTEGER")
+		XCTAssertEqual(generators["$.code"]?["type"] as? String, "Regex")
+		XCTAssertEqual(generators["$.code"]?["regex"] as? String, "^[A-Z]{3}$")
+	}
+
 	func testCreateEvent() async throws {
 		try builder
 			.uponReceiving("a request to create an event with no authorization")

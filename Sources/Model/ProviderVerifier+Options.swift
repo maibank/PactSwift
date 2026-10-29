@@ -25,6 +25,7 @@ public extension ProviderVerifier {
 		// MARK: - Types
 
 		/// Logging level for provider verification
+		@available(*, deprecated, message: "Configure Pact logging with `Logging.initialize(_:)` from PactSwiftMockServer")
 		public enum LogLevel: String {
 			case error
 			case warn
@@ -46,8 +47,8 @@ public extension ProviderVerifier {
 			/// Verify specific pact files
 			case files([String])
 
-			/// Verify specific pacts at URLs
-			case urls([URL])
+			/// Verify specific pacts at URLs, fetched with the `authentication` when set
+			case urls([URL], authentication: PactBroker.Either<PactBroker.SimpleAuth, PactBroker.APIToken>? = nil)
 		}
 
 		/// Filter pacts
@@ -66,6 +67,43 @@ public extension ProviderVerifier {
 			case consumers([String])
 		}
 
+		/// Options of the requests to the provider and the state change URL
+		public struct RequestOptions {
+			/// Headers added to every request to the provider, eg: an `Authorization` header
+			public var customHeaders: [String: String]
+
+			/// Accepts invalid TLS certificates of the provider
+			public var disableSSLVerification: Bool
+
+			/// Timeout of the requests to the provider, in milliseconds. Defaults to 5000.
+			public var timeout: Int?
+
+			/// Whether redirects of the provider are followed. They are followed by default.
+			public var followRedirects: Bool?
+
+			/// Also calls the state change URL to tear down the provider states after each interaction
+			public var stateChangeTeardown: Bool
+
+			/// Sends the provider state to the state change URL as query parameters instead of in the request body
+			public var stateChangeAsQuery: Bool
+
+			public init(
+				customHeaders: [String: String] = [:],
+				disableSSLVerification: Bool = false,
+				timeout: Int? = nil,
+				followRedirects: Bool? = nil,
+				stateChangeTeardown: Bool = false,
+				stateChangeAsQuery: Bool = false
+			) {
+				self.customHeaders = customHeaders
+				self.disableSSLVerification = disableSSLVerification
+				self.timeout = timeout
+				self.followRedirects = followRedirects
+				self.stateChangeTeardown = stateChangeTeardown
+				self.stateChangeAsQuery = stateChangeAsQuery
+			}
+		}
+
 		// MARK: - Properties
 
 		/// The port of provider being verified
@@ -73,6 +111,9 @@ public extension ProviderVerifier {
 
 		/// URL of the provider being verified
 		let providerURL: URL?
+
+		/// Additional transports of the provider
+		let transports: [ProviderVerificationOptions.Transport]
 
 		/// Only validated interactions that match this filter
 		let filterPacts: FilterPacts?
@@ -83,8 +124,17 @@ public extension ProviderVerifier {
 		/// URL to post state change requests to
 		let stateChangeURL: URL?
 
-		/// Sets the log level
-		let logLevel: LogLevel
+		/// Options of the requests to the provider and the state change URL
+		let requestOptions: RequestOptions
+
+		/// Whether the verification fails when the Pact Broker finds no pacts for the provider
+		let noPactsIsError: Bool?
+
+		/// Whether the verification output uses ANSI colours
+		let colouredOutput: Bool?
+
+		/// A file the verification results are written to as JSON
+		let jsonReportURL: URL?
 
 		// MARK: - Initialization
 
@@ -95,21 +145,44 @@ public extension ProviderVerifier {
 		///   - pactsSource: The locations of pacts
 		///   - filter: Only validates the interactions that match the filter
 		///   - stateChangeURL: URL to post state change requests to
-		///   - logLevel: Logging level
+		///   - requestOptions: Options of the requests to the provider and the state change URL
+		///   - noPactsIsError: Whether the verification fails when the Pact Broker finds no pacts for the provider. It fails by default.
+		///   - colouredOutput: Whether the verification output uses ANSI colours. It uses them by default.
+		///   - jsonReportURL: A file the verification results are written to as JSON, with the result of every interaction
+		///
+		/// The verification logs are written to the sinks configured with `Logging.initialize(_:)` from PactSwiftMockServer.
 		///
 		public init(
 			provider: Provider,
 			pactsSource: PactsSource,
 			filter: FilterPacts? = nil,
 			stateChangeURL: URL? = nil,
-			logLevel: LogLevel = .warn
+			requestOptions: RequestOptions = RequestOptions(),
+			noPactsIsError: Bool? = nil,
+			colouredOutput: Bool? = nil,
+			jsonReportURL: URL? = nil
 		) {
 			self.providerURL = provider.url
 			self.port = provider.port
+			self.transports = provider.transports
 			self.pactsSource = pactsSource
 			self.filterPacts = filter
 			self.stateChangeURL = stateChangeURL
-			self.logLevel = logLevel
+			self.requestOptions = requestOptions
+			self.noPactsIsError = noPactsIsError
+			self.colouredOutput = colouredOutput
+			self.jsonReportURL = jsonReportURL
+		}
+
+		@available(*, deprecated, message: "`logLevel` is ignored. Configure Pact logging with `Logging.initialize(_:)` from PactSwiftMockServer")
+		public init(
+			provider: Provider,
+			pactsSource: PactsSource,
+			filter: FilterPacts? = nil,
+			stateChangeURL: URL? = nil,
+			logLevel: LogLevel
+		) {
+			self.init(provider: provider, pactsSource: pactsSource, filter: filter, stateChangeURL: stateChangeURL)
 		}
 	}
 
@@ -117,136 +190,111 @@ public extension ProviderVerifier {
 
 extension ProviderVerifier.Options {
 
-	/// Newline delimited provider verification arguments
-	var args: String {
-		// Verification arguments to pass to pactffi_verify()
-		var newLineDelimitedArgs = [String]()
+	/// The options passed to the PactSwiftMockServer `Verifier`
+	var verificationOptions: ProviderVerificationOptions {
+		var options = ProviderVerificationOptions(
+			provider: .init(url: providerURL, port: port, transports: transports),
+			sources: [],
+			stateChangeTeardown: requestOptions.stateChangeTeardown,
+			stateChangeAsQuery: requestOptions.stateChangeAsQuery,
+			customHeaders: requestOptions.customHeaders,
+			disableSSLVerification: requestOptions.disableSSLVerification,
+			requestTimeout: requestOptions.timeout,
+			followRedirects: requestOptions.followRedirects,
+			noPactsIsError: noPactsIsError,
+			colouredOutput: colouredOutput,
+			jsonReportURL: jsonReportURL
+		)
 
-		// Set verified provider port
-		newLineDelimitedArgs.append("--port\n\(self.port)")
-
-		// Set verified provider url
-		if let providerURL = providerURL {
-			newLineDelimitedArgs.append("--hostname\n\(providerURL.absoluteString)")
-		}
-
-		// Pacts source
 		switch pactsSource {
-
 		case .broker(let broker):
-			// Set broker url
-			newLineDelimitedArgs.append("--broker-url\n\(broker.url)")
-
-			// Broker authentication type
-			// Authenticate with username and password
-			switch broker.authentication {
-			case .auth(let auth):
-				newLineDelimitedArgs.append("--user\n\(auth.username)")
-				newLineDelimitedArgs.append("--password\n\(auth.password)")
-
-			// Authenticate with a Token (Pactflow)
-			case .token(let auth):
-				newLineDelimitedArgs.append("--token\n\(auth.token)")
-			}
-
-			// Use the pact for provider with name
-			newLineDelimitedArgs.append("--provider-name\n\(broker.providerName)")
+			options.provider.name = broker.providerName
+			options.sources = [.broker(broker.verificationSource)]
 
 			// Publishing verification results back to Broker
 			if broker.publishVerificationResult, let providerVersion = broker.providerVersion, providerVersion.isEmpty == false {
-				newLineDelimitedArgs.append("--publish")
-				newLineDelimitedArgs.append("--provider-version\n\(providerVersion)")
-
-				if let providerTags = broker.providerTags, providerTags.isEmpty == false {
-					newLineDelimitedArgs.append("--provider-tags\n\(providerTags.joined(separator: ","))")
-				}
+				options.publish = .init(
+					providerVersion: providerVersion,
+					providerTags: broker.providerTags ?? [],
+					providerBranch: broker.providerBranch,
+					buildURL: broker.buildURL
+				)
 			}
 
-			// Consumer tags
-			broker.consumerTags?.forEach {
-				do {
-					newLineDelimitedArgs.append("--consumer-version-selectors\n\(try $0.toJSONString())")
-				} catch {
-					Logger.log(message: "Failed to convert provider version to JSON representaion: \(String(describing: broker.consumerTags))")
-				}
-			}
+		case .directories(let pactDirs):
+			options.sources = pactDirs.map { .directory($0) }
 
-			// Pending pacts
-			if broker.includePending == true {
-				newLineDelimitedArgs.append("--enable-pending\ntrue")
-			}
+		case .files(let files):
+			options.sources = files.map { .file($0) }
 
-			// WIP pacts
-			if let includeWIP = broker.includeWIP {
-				// Enable pending pacts only if it wasn not set already!
-				let enablePendingArgs = "--enable-pending\ntrue"
-				if newLineDelimitedArgs.contains(where: { $0 == enablePendingArgs }) == false {
-					newLineDelimitedArgs.append(enablePendingArgs)
-				}
+		case let .urls(pactURLs, authentication):
+			options.sources = pactURLs.map { .url($0, authentication: authentication?.verificationAuthentication) }
+		}
 
-				// Set the date from which to include WIP pacts
-				newLineDelimitedArgs.append("--include-wip-pacts-since\n\(includeWIP.sinceDate.iso8601short)")
+		switch filterPacts {
+		case .noState:
+			options.filter = .init(noState: true)
 
-				// Explicitly set provider version argument but only when not publishing verification result (otherwise it would be duplicated)
-				// See [Work In Progress - Technical details](https://docs.pact.io/pact_broker/advanced_topics/wip_pacts/#technical-details) for more.
-				if broker.publishVerificationResult == false {
-					newLineDelimitedArgs.append("--provider-version\n\(includeWIP.providerVersion)")
-				}
-			}
+		case .states(let states) where states.isEmpty == false:
+			options.filter = .init(state: matchingAny(of: states))
 
-		// Verify pacts from directories
-		case .directories(let pactDirs) where pactDirs.isEmpty == false:
-			pactDirs.forEach { newLineDelimitedArgs.append("--dir\n\($0)") }
+		case .descriptions(let descriptions) where descriptions.isEmpty == false:
+			options.filter = .init(description: matchingAny(of: descriptions))
 
-		// Verify specific pact files
-		case .files(let files) where files.isEmpty == false:
-			files.forEach { newLineDelimitedArgs.append("--file\n\($0)") }
-
-		// Verify pacts from specific URLs
-		case .urls(let pactURLs) where pactURLs.isEmpty == false:
-			pactURLs.forEach { newLineDelimitedArgs.append("--url\n\($0)") }
+		case .consumers(let consumers):
+			options.consumers = consumers
 
 		default:
 			break
 		}
 
-		// Set state filters
-		if let filterProviderStates = filterPacts {
-			switch filterProviderStates {
+		options.stateChangeURL = stateChangeURL
 
-			// Only test interactions with no specific state defined
-			case .noState:
-				newLineDelimitedArgs.append("--filter-no-state\ntrue")
-
-			// Only test interactions with specific states
-			case .states(let states) where states.isEmpty == false:
-				states.forEach { newLineDelimitedArgs.append("--filter-state\n\($0)") }
-
-			// Only test interactions with specific descriptions
-			case .descriptions(let descriptions) where descriptions.isEmpty == false:
-				descriptions.forEach { newLineDelimitedArgs.append("--filter-description\n\($0)") }
-
-			// Only test pact contracts with specific consumers
-			case .consumers(let consumers) where consumers.isEmpty == false:
-				consumers.forEach { newLineDelimitedArgs.append("--filter-consumer\n\($0)") }
-
-			default:
-				break
-			}
-		}
-
-		// State change URL
-		if let stateChangeURL = stateChangeURL {
-			newLineDelimitedArgs.append("--state-change-url\n\(stateChangeURL.absoluteString)")
-		}
-
-		// Set logging level
-		newLineDelimitedArgs.append("--loglevel\n\(self.logLevel.rawValue)")
-
-		// Convert all verification arguments to a `String` and return it
-		return newLineDelimitedArgs.joined(separator: "\n")
+		return options
 	}
 
+}
+
+private extension PactBroker {
+
+	var verificationSource: ProviderVerificationOptions.Broker {
+		let consumerVersionSelectors: [String] = consumerTags?.compactMap {
+			do {
+				return try $0.toJSONString()
+			} catch {
+				Logger.log(message: "Failed to convert consumer version selector to JSON representation: \($0)")
+				return nil
+			}
+		} ?? []
+
+		return .init(
+			url: url,
+			authentication: authentication.verificationAuthentication,
+			// WIP pacts are only verified with pending pacts enabled
+			enablePending: includePending == true || includeWIP != nil,
+			includeWIPPactsSince: includeWIP?.sinceDate.iso8601short,
+			providerTags: providerTags ?? [],
+			providerBranch: providerBranch,
+			consumerVersionSelectors: consumerVersionSelectors
+		)
+	}
+
+}
+
+private extension PactBroker.Either where A == PactBroker.SimpleAuth, T == PactBroker.APIToken {
+
+	var verificationAuthentication: ProviderVerificationOptions.Authentication {
+		switch self {
+		case .auth(let auth): return .basic(username: auth.username, password: auth.password)
+		case .token(let auth): return .token(auth.token)
+		}
+	}
+
+}
+
+/// A regular expression matching any of the given regular expressions
+private func matchingAny(of patterns: [String]) -> String {
+	patterns.count == 1 ? patterns[0] : patterns.map { "(?:\($0))" }.joined(separator: "|")
 }
 
 private extension Date {
@@ -254,7 +302,9 @@ private extension Date {
 	/// Date represented as string in short ISO8601 format (eg: "2021-08-24")
 	var iso8601short: String {
 		let formatter = DateFormatter()
-		formatter.dateFormat = "YYYY-MM-dd"
+		formatter.locale = Locale(identifier: "en_US_POSIX")
+		formatter.calendar = Calendar(identifier: .gregorian)
+		formatter.dateFormat = "yyyy-MM-dd"
 		return formatter.string(from: self)
 	}
 
