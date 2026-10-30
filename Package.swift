@@ -19,7 +19,7 @@ let package = Package(
 	],
 	
 	dependencies: [
-		.package(url: "https://github.com/maibank/PactSwiftMockServer.git", branch: "main"),
+		.package(url: "https://github.com/maibank/PactSwiftMockServer.git", exact: "1.0.0"),
 		.package(url: "https://github.com/pointfreeco/swift-snapshot-testing", exact: "1.16.0"),
 	],
 	
